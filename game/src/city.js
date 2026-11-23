@@ -325,6 +325,43 @@ export function buildCity(seed = CITY_SEED) {
     cars.push({ x: cx, z: cz, angle: 90, color: carColors[Math.floor(rng() * carColors.length)], taxi: false });
   }
 
+  // Drivable cars: the three yellow taxis are sedans, and three parked
+  // cars near the spawn are the other profiles. A drivable car carries
+  // a `profile` (and a heading in radians); the renderer skips profiled
+  // cars in the static pass and draws them dynamically instead, so the
+  // one the player takes does not stay behind as a ghost. The spawn is
+  // on the boulevard near z=860, so the compact and the van sit within
+  // a short walk of it and the coupe waits on the 800 street.
+  for (const c of cars) {
+    if (c.taxi) {
+      c.profile = 'sedan';
+      c.heading = Math.PI;
+    }
+  }
+  const nearestBoulevard = (z) => {
+    let best = null;
+    for (const c of cars) {
+      if (c.profile || Math.abs(c.x - 400) > 25) continue;
+      if (!best || Math.abs(c.z - z) < Math.abs(best.z - z)) best = c;
+    }
+    return best;
+  };
+  const compact = nearestBoulevard(710);
+  if (compact) {
+    compact.profile = 'compact';
+    compact.heading = Math.PI;
+  }
+  const van = nearestBoulevard(1050);
+  if (van) {
+    van.profile = 'van';
+    van.heading = Math.PI;
+  }
+  const coupe = cars.find((c) => c.x === 800 && c.z === -600);
+  if (coupe) {
+    coupe.profile = 'coupe';
+    coupe.heading = Math.PI;
+  }
+
   const pedestrians = [];
   const pedColors = [[0.85, 0.45, 0.35], [0.25, 0.6, 0.6], [0.95, 0.8, 0.15], [0.4, 0.6, 0.35], [0.7, 0.4, 0.6], [0.9, 0.9, 0.85]];
   for (let i = 0; i < 12; i++) {

@@ -34,12 +34,34 @@ export function createCamera() {
     },
     zoom(factor) {
       this.dist = Math.max(12, Math.min(1600, this.dist * factor));
+      // The player took the distance into their own hands: the on-foot
+      // ease back to a walking view stops fighting the wheel.
+      this.userZoomed = true;
     },
     forward() {
       return [Math.sin(this.yaw), 0, Math.cos(this.yaw)];
     },
     right() {
       return [Math.cos(this.yaw), 0, -Math.sin(this.yaw)];
+    },
+    // Chase mode (Stage B): the camera trails the car, looking forward
+    // along its heading. The yaw eases back behind the car after the
+    // player drags it away, and the distance settles to a close chase
+    // view. On foot the camera is a free orbit around Mara instead.
+    chase(car, dt) {
+      let dh = car.heading - this.yaw;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const k = 1 - Math.exp(-2.5 * dt);
+      this.yaw += dh * k;
+      this.pitch += (0.3 - this.pitch) * (1 - Math.exp(-3 * dt));
+      if (this.dist > 26) this.dist += (20 - this.dist) * (1 - Math.exp(-2 * dt));
+      const fwd = [Math.sin(car.heading), Math.cos(car.heading)];
+      this.target = [car.x + fwd[0] * 9, 3, car.z + fwd[1] * 9];
+    },
+    // On foot: keep the camera aimed at Mara, wherever she walks.
+    follow(x, z) {
+      this.target = [x, 2, z];
     },
   };
   return cam;

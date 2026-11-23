@@ -52,6 +52,14 @@
     font-family: Georgia, serif; font-size: 13px; color: rgba(234, 216, 178, 0.9);
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); pointer-events: none; white-space: nowrap;
   }
+  #prompt {
+    position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%); z-index: 5;
+    font-family: Georgia, serif; font-size: 16px; font-weight: bold; color: #ead8b2;
+    background: rgba(20, 45, 56, 0.72); border: 1px solid rgba(234, 216, 178, 0.6);
+    border-radius: 6px; padding: 6px 14px; pointer-events: none; white-space: nowrap;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  }
+  #prompt:empty { display: none; }
   #status { position: fixed; right: 14px; top: 222px; z-index: 6; font: 10px monospace; color: #888; text-align: right; }
 </style>
 </head>
@@ -65,7 +73,8 @@
 <canvas id="minimap" width="220" height="198"></canvas>
 <div id="hud-compass"><div id="compass-strip"></div></div>
 <div id="hud-speed"><span id="hud-speed-num">0</span> <span class="unit">km/h</span></div>
-<div id="hint">Drag to look around &middot; Scroll to zoom &middot; 1 / 2 / 3 midday / sunset / night &middot; T cycle light</div>
+<div id="prompt"></div>
+<div id="hint">WASD drive / walk &middot; E enter / exit car &middot; Drag to look around &middot; Scroll to zoom &middot; 1 / 2 / 3 midday / sunset / night &middot; T cycle light</div>
 <div id="status"></div>
 <script type="module" src="./src/main.js"></script>
 </body>

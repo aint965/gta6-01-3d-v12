@@ -17,41 +17,78 @@ attribute float aSpec;
 attribute float aFog;
 uniform mat4 uProj;
 uniform mat4 uView;
-uniform vec3 uSunDir;
-uniform vec3 uSunColor;
-uniform float uAmbient;
-uniform vec3 uCamPos;
-uniform float uFogDensity;
+varying highp vec3 vWorld;
+varying highp vec3 vNormal;
 varying vec3 vColor;
 varying vec3 vEmissive;
-varying float vFog;
+varying float vSpec;
+varying float vFogFlag;
 void main() {
   vec4 world = vec4(aPos, 1.0);
   gl_Position = uProj * uView * world;
-  vec3 n = normalize(aNormal);
-  float diff = max(dot(n, uSunDir), 0.0);
-  vec3 col = aColor * (uAmbient + uSunColor * diff);
-  vec3 viewDir = normalize(uCamPos - aPos);
-  vec3 refl = reflect(-uSunDir, n);
-  float sp = pow(max(dot(refl, viewDir), 0.0), 24.0) * aSpec;
-  col += uSunColor * sp;
-  vColor = col;
+  vWorld = aPos;
+  vNormal = aNormal;
+  vColor = aColor;
   vEmissive = aEmissive;
-  vFog = (1.0 - exp(-uFogDensity * length(uCamPos - aPos))) * aFog;
+  vSpec = aSpec;
+  vFogFlag = aFog;
   gl_PointSize = 2.0;
 }
 `;
 
 const FRAG_REAL = `
 precision mediump float;
+varying highp vec3 vWorld;
+varying highp vec3 vNormal;
 varying vec3 vColor;
 varying vec3 vEmissive;
-varying float vFog;
+varying float vSpec;
+varying float vFogFlag;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uAmbient;
+uniform vec3 uCamPos;
+uniform float uFogDensity;
 uniform vec3 uFogColor;
 uniform float uEmissive;
+uniform vec3 uSpotPos[8];
+uniform vec3 uSpotDir[8];
+uniform vec3 uSpotColor[8];
+uniform vec2 uSpotCos[8];
+uniform int uSpotCount;
 void main() {
-  vec3 col = vColor + vEmissive * uEmissive;
-  col = mix(col, uFogColor, clamp(vFog, 0.0, 1.0));
+  // Lighting is per-fragment now (Stage B): the old per-vertex pass
+  // could not show a headlight pool in the middle of a long road quad,
+  // because the pool falls between the quad's vertices. World position
+  // and normal are interpolated, so every surface gets the same light.
+  vec3 n = normalize(vNormal);
+  float diff = max(dot(n, uSunDir), 0.0);
+  vec3 col = vColor * (uAmbient + uSunColor * diff);
+  vec3 viewDir = normalize(uCamPos - vWorld);
+  vec3 refl = reflect(-uSunDir, n);
+  float sp = pow(max(dot(refl, viewDir), 0.0), 24.0) * vSpec;
+  col += uSunColor * sp;
+  // Headlights: world-space spot cones. Each cone lights the road and
+  // the cars inside it; outside the cone nothing changes. The cone test
+  // uses the direction FROM the light TO the surface: the surface-to-
+  // light vector points the other way, so dotting it with the spot
+  // direction gives about -1 and the cone is always zero. (That was
+  // the Stage B headlight-test failure: every region measured a rise
+  // of exactly 0, and the bright pool in the screenshot was the moon's
+  // specular reflection on the road, not the headlights.)
+  for (int i = 0; i < 8; i++) {
+    if (i >= uSpotCount) break;
+    vec3 toSurf = vWorld - uSpotPos[i];
+    float dist = length(toSurf);
+    vec3 sdir = toSurf / max(dist, 0.001);
+    float cosA = dot(sdir, uSpotDir[i]);
+    float cone = smoothstep(uSpotCos[i].x, uSpotCos[i].y, cosA);
+    float atten = 1.0 / (1.0 + 0.02 * dist + 0.0004 * dist * dist);
+    col += uSpotColor[i] * cone * atten;
+  }
+  col += vEmissive * uEmissive;
+  float fogF = (1.0 - exp(-uFogDensity * length(uCamPos - vWorld))) * vFogFlag;
+  col = mix(col, uFogColor, clamp(fogF, 0.0, 1.0));
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -119,22 +156,31 @@ export function createRenderer(canvas, city) {
   for (const name of ['aPos', 'aNormal', 'aColor', 'aEmissive', 'aSpec', 'aFog']) {
     loc[name] = gl.getAttribLocation(prog, name);
   }
-  for (const name of ['uProj', 'uView', 'uSunDir', 'uSunColor', 'uAmbient', 'uCamPos', 'uFogDensity', 'uFogColor', 'uEmissive']) {
+  for (const name of ['uProj', 'uView', 'uSunDir', 'uSunColor', 'uAmbient', 'uCamPos', 'uFogDensity', 'uFogColor', 'uEmissive', 'uSpotPos', 'uSpotDir', 'uSpotColor', 'uSpotCos', 'uSpotCount']) {
     loc[name] = gl.getUniformLocation(prog, name);
   }
 
   // ---- geometry builders --------------------------------------------------
-  const pos = [], nrm = [], col = [], emi = [], spc = [], fog = [];
+  // The builders write into `M`, the mesh under construction. The static
+  // city is built into `staticMesh` once; Stage B's moving cars, people,
+  // signal dots and dust are built into a fresh mesh every frame and
+  // drawn from the dynamic buffer. Sharing the builders keeps both
+  // passes on the same shader and the same winding rules.
+  function newMesh() {
+    return { pos: [], nrm: [], col: [], emi: [], spc: [], fog: [] };
+  }
+  const staticMesh = newMesh();
+  let M = staticMesh;
   function tri(p0, p1, p2, n, c, e, s, f) {
     // Winding: (p0, p2, p1) so the geometric normal matches the declared
     // outward normal — with the opposite order every face is back-facing
     // and culled, and the frame shows only sky.
-    pos.push(...p0, ...p2, ...p1);
-    nrm.push(...n, ...n, ...n);
-    col.push(...c, ...c, ...c);
-    emi.push(...e, ...e, ...e);
-    spc.push(s, s, s);
-    fog.push(f, f, f);
+    M.pos.push(...p0, ...p2, ...p1);
+    M.nrm.push(...n, ...n, ...n);
+    M.col.push(...c, ...c, ...c);
+    M.emi.push(...e, ...e, ...e);
+    M.spc.push(s, s, s);
+    M.fog.push(f, f, f);
   }
   function quad(p0, p1, p2, p3, n, c, e, s, f) {
     tri(p0, p1, p2, n, c, e, s, f);
@@ -343,55 +389,58 @@ export function createRenderer(canvas, city) {
     box(boat.x, 2.6, boat.z, boat.len * 0.45, 2.0, 5, [0.92, 0.9, 0.84], { rot: boat.heading });
   }
   for (const inter of city.intersections) {
-    // One signal on each of two opposite corners: red on one, green on
-    // the other, so a junction reads as a working one from the street.
-    // Stage B animates the cycle; Stage A only shows the furniture.
+    // The poles and head housings are static furniture; the light dots
+    // are drawn dynamically every frame, so the cycle actually changes
+    // colour. Corner (+14,+14) shows the north-south state, (-14,-14)
+    // the east-west state.
     box(inter.x + 14, 3.5, inter.z + 14, 0.4, 7, 0.4, [0.2, 0.22, 0.24]);
     box(inter.x + 14, 7.2, inter.z + 14, 1.6, 1.0, 1.0, [0.12, 0.13, 0.14]);
-    box(inter.x + 14, 7.3, inter.z + 14.6, 0.5, 0.5, 0.2, [0.2, 0.2, 0.2], { emissive: [1.0, 0.1, 0.08] });
     box(inter.x - 14, 3.5, inter.z - 14, 0.4, 7, 0.4, [0.2, 0.22, 0.24]);
     box(inter.x - 14, 7.2, inter.z - 14, 1.6, 1.0, 1.0, [0.12, 0.13, 0.14]);
-    box(inter.x - 14, 7.3, inter.z - 14.6, 0.5, 0.5, 0.2, [0.2, 0.2, 0.2], { emissive: [0.15, 0.9, 0.2] });
   }
   for (const car of city.cars) {
     // A parked car: body, dark glass cabin, and a roof sign on taxis.
+    // Cars with a profile are drivable: they are drawn dynamically
+    // instead, so the one the player takes does not stay behind as a
+    // ghost in the static buffer.
+    if (car.profile) continue;
     box(car.x, 0.7, car.z, 2.0, 1.1, 4.4, car.color, { rot: car.angle, spec: 0.5 });
     box(car.x, 1.5, car.z, 1.8, 0.7, 2.4, [0.15, 0.16, 0.18], { rot: car.angle, spec: 0.6 });
     if (car.taxi) box(car.x, 2.05, car.z, 0.5, 0.35, 1.0, [0.15, 0.15, 0.15], { rot: car.angle, emissive: [0.9, 0.8, 0.2] });
   }
-  for (const p of city.pedestrians) {
-    // A person on foot: a slim coloured cone body and a head, so the
-    // figure reads as a person and not a tree. Static in Stage A;
-    // Stage B makes them walk.
-    cone(p.x, 0, p.z, 0.6, 2.3, 6, p.color);
-    box(p.x, 2.6, p.z, 0.75, 0.75, 0.75, [0.85, 0.7, 0.55]);
-  }
+  // People are drawn dynamically now (they walk in Stage B); the static
+  // pass keeps only the city itself, so no figure is baked in place.
 
   // ---- buffers ---------------------------------------------------------------------
-  function makeBuffer(arrays) {
-    // Interleave the six attribute arrays vertex by vertex: position(3),
-    // normal(3), colour(3), emissive(3), specular(1), fog(1). The
-    // attribute pointers read them strided, so concatenating the arrays
-    // instead would hand every vertex another vertex's coordinates.
-    const n = arrays[0].length / 3;
-    const interleaved = new Float32Array(n * 14);
+  // Interleave the six attribute arrays vertex by vertex: position(3),
+  // normal(3), colour(3), emissive(3), specular(1), fog(1). The
+  // attribute pointers read them strided, so concatenating the arrays
+  // instead would hand every vertex another vertex's coordinates.
+  function interleaveInto(mesh, out) {
+    const n = mesh.pos.length / 3;
     for (let i = 0; i < n; i++) {
       const o = i * 14;
-      interleaved[o + 0] = arrays[0][i * 3];
-      interleaved[o + 1] = arrays[0][i * 3 + 1];
-      interleaved[o + 2] = arrays[0][i * 3 + 2];
-      interleaved[o + 3] = arrays[1][i * 3];
-      interleaved[o + 4] = arrays[1][i * 3 + 1];
-      interleaved[o + 5] = arrays[1][i * 3 + 2];
-      interleaved[o + 6] = arrays[2][i * 3];
-      interleaved[o + 7] = arrays[2][i * 3 + 1];
-      interleaved[o + 8] = arrays[2][i * 3 + 2];
-      interleaved[o + 9] = arrays[3][i * 3];
-      interleaved[o + 10] = arrays[3][i * 3 + 1];
-      interleaved[o + 11] = arrays[3][i * 3 + 2];
-      interleaved[o + 12] = arrays[4][i];
-      interleaved[o + 13] = arrays[5][i];
+      out[o + 0] = mesh.pos[i * 3];
+      out[o + 1] = mesh.pos[i * 3 + 1];
+      out[o + 2] = mesh.pos[i * 3 + 2];
+      out[o + 3] = mesh.nrm[i * 3];
+      out[o + 4] = mesh.nrm[i * 3 + 1];
+      out[o + 5] = mesh.nrm[i * 3 + 2];
+      out[o + 6] = mesh.col[i * 3];
+      out[o + 7] = mesh.col[i * 3 + 1];
+      out[o + 8] = mesh.col[i * 3 + 2];
+      out[o + 9] = mesh.emi[i * 3];
+      out[o + 10] = mesh.emi[i * 3 + 1];
+      out[o + 11] = mesh.emi[i * 3 + 2];
+      out[o + 12] = mesh.spc[i];
+      out[o + 13] = mesh.fog[i];
     }
+    return n;
+  }
+  function makeBuffer(mesh) {
+    const n = mesh.pos.length / 3;
+    const interleaved = new Float32Array(n * 14);
+    interleaveInto(mesh, interleaved);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, interleaved, gl.STATIC_DRAW);
@@ -407,8 +456,40 @@ export function createRenderer(canvas, city) {
       off += size * 4;
     }
   }
-  const mainBuf = makeBuffer([pos, nrm, col, emi, spc, fog].map((a) => new Float32Array(a)));
-  const mainCount = pos.length / 3;
+  const mainBuf = makeBuffer(staticMesh);
+  const mainCount = staticMesh.pos.length / 3;
+
+  // The dynamic buffer: pre-allocated for 16384 vertices and rewritten
+  // every frame from a fresh mesh (moving cars, walking people, signal
+  // dots, dust). startDynamic hands the builders a fresh mesh;
+  // finishDynamic uploads it and draws it with the same program.
+  // 16384 leaves room above the ~10300 the Stage B scene actually
+  // draws (15 traffic cars, 7 drivable cars, 25 walkers, the player
+  // car, signal dots, dust); the first browser run overflowed the
+  // original 8192.
+  const DYN_MAX_VERTS = 16384;
+  const dynBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, dynBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, DYN_MAX_VERTS * 14 * 4, gl.DYNAMIC_DRAW);
+  const dynInterleaved = new Float32Array(DYN_MAX_VERTS * 14);
+  let dynMesh = null;
+  let savedM = null;
+  function startDynamic() {
+    dynMesh = newMesh();
+    savedM = M;
+    M = dynMesh;
+    return dynMesh;
+  }
+  function finishDynamic() {
+    M = savedM;
+    const n = interleaveInto(dynMesh, dynInterleaved);
+    if (n > DYN_MAX_VERTS) throw new Error('dynamic mesh overflow: ' + n + ' vertices');
+    gl.bindBuffer(gl.ARRAY_BUFFER, dynBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, dynInterleaved.subarray(0, n * 14));
+    bindAttribs(dynBuf);
+    gl.drawArrays(gl.TRIANGLES, 0, n);
+    return n;
+  }
 
   // Stars on a dome, the sun disc and the moon: separate small buffers.
   const starPos = [], starNrm = [], starCol = [], starEmi = [], starSpc = [], starFog = [];
@@ -430,7 +511,7 @@ export function createRenderer(canvas, city) {
       starFog.push(0);
     }
   }
-  const starBuf = makeBuffer([starPos, starNrm, starCol, starEmi, starSpc, starFog].map((a) => new Float32Array(a)));
+  const starBuf = makeBuffer({ pos: starPos, nrm: starNrm, col: starCol, emi: starEmi, spc: starSpc, fog: starFog });
   const starCount = starPos.length / 3;
 
   function discBuffer(dir, size, color) {
@@ -464,13 +545,21 @@ export function createRenderer(canvas, city) {
     const eArr = [...color, ...color, ...color, ...color, ...color, ...color];
     const sArr = [0, 0, 0, 0, 0, 0];
     const fArr = [0, 0, 0, 0, 0, 0];
-    return makeBuffer([pArr, nArr, cArr, eArr, sArr, fArr].map((a) => new Float32Array(a)));
+    return makeBuffer({ pos: pArr, nrm: nArr, col: cArr, emi: eArr, spc: sArr, fog: fArr });
   }
 
   let presetName = 'day';
   let preset = PRESETS.day;
   let camPos = [0, 100, 500];
   let hazeOn = true;
+  // Headlight spot state, filled by setSpots and uploaded in render().
+  // The flat arrays are reused every frame so setting spots allocates
+  // nothing.
+  let spotCount = 0;
+  const spotPos = new Float32Array(24);
+  const spotDir = new Float32Array(24);
+  const spotColor = new Float32Array(24);
+  const spotCos = new Float32Array(16);
   const PRESETS_ORDER = ['day', 'sunset', 'night'];
   const sunBuf = discBuffer(PRESETS.day.sunDir, 130, [1.0, 0.9, 0.65]);
   const sunsetBuf = discBuffer(PRESETS.sunset.sunDir, 170, [1.0, 0.55, 0.25]);
@@ -517,6 +606,13 @@ export function createRenderer(canvas, city) {
     gl.uniform1f(loc.uFogDensity, hazeOn ? preset.fogDensity : 0);
     gl.uniform1f(loc.uEmissive, preset.emissive);
     gl.uniform3f(loc.uCamPos, camPos[0], camPos[1], camPos[2]);
+    gl.uniform1i(loc.uSpotCount, spotCount);
+    if (spotCount > 0) {
+      gl.uniform3fv(loc.uSpotPos, spotPos);
+      gl.uniform3fv(loc.uSpotDir, spotDir);
+      gl.uniform3fv(loc.uSpotColor, spotColor);
+      gl.uniform2fv(loc.uSpotCos, spotCos);
+    }
     bindAttribs(mainBuf);
     gl.drawArrays(gl.TRIANGLES, 0, mainCount);
     if (preset.stars) {
@@ -542,6 +638,32 @@ export function createRenderer(canvas, city) {
       hazeOn = !!on;
     },
     preset: () => presetName,
+    // Headlight spots: up to 8 world-space cones, each { pos, dir, color,
+    // cosOuter, cosInner }. Set every frame before render(); the same
+    // uniforms light the static city and the dynamic cars alike.
+    setSpots(spots) {
+      spotCount = Math.min(8, spots.length);
+      for (let i = 0; i < spotCount; i++) {
+        const s = spots[i];
+        spotPos[i * 3] = s.pos[0];
+        spotPos[i * 3 + 1] = s.pos[1];
+        spotPos[i * 3 + 2] = s.pos[2];
+        spotDir[i * 3] = s.dir[0];
+        spotDir[i * 3 + 1] = s.dir[1];
+        spotDir[i * 3 + 2] = s.dir[2];
+        spotColor[i * 3] = s.color[0];
+        spotColor[i * 3 + 1] = s.color[1];
+        spotColor[i * 3 + 2] = s.color[2];
+        spotCos[i * 2] = s.cosOuter;
+        spotCos[i * 2 + 1] = s.cosInner;
+      }
+    },
+    // Dynamic geometry: startDynamic hands the shared builders a fresh
+    // mesh; finishDynamic uploads it and draws it with the same program.
+    // The builders (box, quad, cone, prism, tri) are exposed for that.
+    startDynamic,
+    finishDynamic,
+    box, quad, cone, prism, tri,
     setCamera(eye, target) {
       camPos = [...eye];
       setCamera(eye, target);

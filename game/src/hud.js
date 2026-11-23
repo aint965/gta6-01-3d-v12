@@ -12,6 +12,7 @@ export function createHud() {
   const fpsEl = document.getElementById('hud-fps');
   const stripEl = document.getElementById('compass-strip');
   const speedEl = document.getElementById('hud-speed-num');
+  const promptEl = document.getElementById('prompt');
   const PRESET_LABEL = { day: 'Midday', sunset: 'Sunset', night: 'Night' };
 
   // The compass strip: three copies of the 360-degree dial at 2px per
@@ -44,6 +45,11 @@ export function createHud() {
         stripEl.style.transform = `translateX(${110 - (heading + 360) * 2}px)`;
       }
       if (speedEl && speed !== undefined) speedEl.textContent = String(Math.round(speed));
+    },
+    // The action prompt ("E — Drive the sedan", "E — Get out"): shown
+    // only when an action is actually available, cleared otherwise.
+    prompt(text) {
+      if (promptEl) promptEl.textContent = text || '';
     },
   };
 }

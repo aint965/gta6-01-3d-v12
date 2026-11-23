@@ -27,7 +27,7 @@ export function createMinimap(canvas, city) {
   const X = (x) => (x - bx.x0) * sx;
   const Z = (z) => (z - bx.z0) * sy;
 
-  function draw(camera) {
+  function draw(camera, extras) {
     ctx.clearRect(0, 0, W, H);
     // Land.
     ctx.fillStyle = '#c9bd9a';
@@ -72,6 +72,32 @@ export function createMinimap(canvas, city) {
       ctx.arc(X(t[0]), Z(t[2]), 4, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
+    }
+    // Stage B: the living map. The player is a coral dot with a white
+    // ring, traffic cars are small white dots, and the cars Mara can
+    // drive are yellow — the map answers "where is my car" at a glance.
+    if (extras) {
+      if (extras.drivable) {
+        ctx.fillStyle = '#e8b400';
+        for (const c of extras.drivable) {
+          ctx.fillRect(X(c.x) - 1, Z(c.z) - 1, 2, 2);
+        }
+      }
+      if (extras.traffic) {
+        ctx.fillStyle = '#ffffff';
+        for (const c of extras.traffic) {
+          ctx.fillRect(X(c.x) - 1, Z(c.z) - 1, 2, 2);
+        }
+      }
+      if (extras.player) {
+        ctx.fillStyle = '#d77f69';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(X(extras.player.x), Z(extras.player.z), 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
   }
   return { draw };
